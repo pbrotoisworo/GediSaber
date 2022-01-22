@@ -8,18 +8,14 @@
  Source: https://lpdaac.usgs.gov/resources/e-learning/spatial-querying-of-gedi-version-2-data-in-python/
 ---------------------------------------------------------------------------------------------------
 """
-# Load necessary packages into Python
-from subprocess import Popen
-from getpass import getpass
-from netrc import netrc
-import argparse
-import time
-from datetime import datetime
 import os
-import requests
-from requests.auth import HTTPBasicAuth
-import geopandas as gpd
+# Load necessary packages into Python
 from getpass import getpass
+
+import geopandas as gpd
+import requests
+from shapely.geometry import MultiPolygon, Polygon
+from shapely.ops import orient
 
 
 class GediFinder:
@@ -40,7 +36,6 @@ class GediFinder:
             'L1B': 'GEDI01_B.002',
             'L2A': 'GEDI02_A.002',
             'L2B': 'GEDI02_B.002',
-            # 'L4A': 'GEDI04_A.002'
         }
         self.geom = geom
         self.bbox = self._get_bbox()
@@ -60,10 +55,17 @@ class GediFinder:
         """
         Get GEDI granules
 
-        :param product:
-        :param out_file:
+        :param product: Type of GEDI to search for
+        :param out_file: Granule URLs will be saved in a txt file
         :return:
         """
+
+        if product == 'L4A':
+            return self._search_L4A(out_file)
+        else:
+            product_str = product
+            product = self.gedi_products[product]
+
         page = 1
         try:
             # Send GET request to CMR granule search endpoint w/ product concept ID,
@@ -81,31 +83,32 @@ class GediFinder:
 
             # CMR returns more info than just the Data Pool links, below use list
             # comprehension to return a list of DP links
-            granules = [c['links'][0]['href'] for c in cmr_response]
-            granules = [x for x in granules if x.endswith('.h5')]
-            if not out_file:
-                return granules
-            else:
-                # Set up output text file name using the current datetime
-                # outName = f"{product.replace('.', '_')}_GranuleList_{datetime.now().strftime('%Y%m%d%H%M%S')}.txt"
+            granule_size = [float(x['granule_size']) for x in cmr_response]
+            granule_urls = [c['links'][0]['href'] for c in cmr_response]
+            granule_urls = [x for x in granule_urls if x.endswith('.h5')]
 
+            print(f"Total {product_str} granules found: ", len(granule_urls))
+            print("Total file size (MB): ", '{0:,.2f}'.format(sum(granule_size)))
+
+            if not out_file:
+                return granule_urls
+            else:
                 # Open file and write each granule link on a new line
                 with open(out_file, "w") as gf:
-                    for g in granules:
+                    for g in granule_urls:
                         gf.write(f"{g}\n")
-                # print(
-                #     f"File containing links to intersecting {product} Version 2 data has been saved to:\n {os.getcwd()}\{outName}")
 
         except:
             # If the request did not complete successfully, print out the response from CMR
             print(
                 requests.get(f"{self.base_url}{self.concept_ids[product]}&bounding_box={self.bbox.replace(' ', '')}&pageNum={page}").json())
 
-    def download(self, product, username: str, password=None):
+    def download(self, product, output_folder, username: str, password=None):
         """
         Download GEDI data
 
         :param product: Type of GEDI product [L1B, L2A, L2B, L4A]
+        :param output_folder: Folder to save downloaded GEDI data
         :param username: Username for NASA Earthdata
         :param password: Password for NASA Earthdata. Leave empty for hidden input.
         :return:
@@ -114,7 +117,10 @@ class GediFinder:
         if not password:
             password = getpass()
 
-        granules = self.search(product)
+        if product == 'L4A':
+            granules = self._search_L4A()
+        else:
+            granules = self.search(product)
 
         for item in granules:
             url = item.split('.h5')[0] + '.h5'
@@ -130,7 +136,8 @@ class GediFinder:
                 response.raise_for_status()
 
                 # save the file
-                with open(filename, 'wb') as fd:
+                output_file = os.path.join(output_folder, filename)
+                with open(output_file, 'wb') as fd:
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
                         fd.write(chunk)
 
@@ -140,6 +147,97 @@ class GediFinder:
             break
 
         return
+
+    def _search_L4A(self, out_file=None):
+        # converting to WGS84 coordinate system
+        grsm_poly = gpd.read_file(self.geom)
+        grsm_epsg4326 = grsm_poly.to_crs(epsg=4326)
+
+        # orienting coordinates clockwise
+        grsm_epsg4326.geometry = grsm_epsg4326.geometry.apply(orient, args=(1,))
+
+        # reducing number of vertices in the polygon
+        # CMR has 1000000 bytes limit
+        grsm_epsg4326 = grsm_epsg4326.simplify(0.0005)
+
+        doi = '10.3334/ORNLDAAC/1986'  # GEDI L4A DOI
+
+        # CMR API base url
+        cmrurl = 'https://cmr.earthdata.nasa.gov/search/'
+
+        doisearch = cmrurl + 'collections.json?doi=' + doi
+        concept_id = requests.get(doisearch).json()['feed']['entry'][0]['id']
+
+        geojson = {"shapefile": ("grsm.json", grsm_epsg4326.geometry.to_json(), "application/geo+json")}
+
+        page_num = 1
+        page_size = 2000  # CMR page size limit
+
+        granule_arr = []
+
+        while True:
+
+            # defining parameters
+            cmr_param = {
+                "collection_concept_id": concept_id,
+                "page_size": page_size,
+                "page_num": page_num,
+                "simplify-shapefile": 'true'  # this is needed to bypass 5000 coordinates limit of CMR
+            }
+
+            granulesearch = cmrurl + 'granules.json'
+            response = requests.post(granulesearch, data=cmr_param, files=geojson)
+            granules = response.json()['feed']['entry']
+
+            if granules:
+                for g in granules:
+                    granule_url = ''
+                    granule_poly = ''
+
+                    # read file size
+                    granule_size = float(g['granule_size'])
+
+                    # reading bounding geometries
+                    if 'polygons' in g:
+                        polygons = g['polygons']
+                        multipolygons = []
+                        for poly in polygons:
+                            i = iter(poly[0].split(" "))
+                            ltln = list(map(" ".join, zip(i, i)))
+                            multipolygons.append(
+                                Polygon([[float(p.split(" ")[1]), float(p.split(" ")[0])] for p in ltln]))
+                        granule_poly = MultiPolygon(multipolygons)
+
+                    # Get URL of HDF5 files
+                    for links in g['links']:
+                        if 'title' in links and links['title'].startswith('Download') \
+                                and links['title'].endswith('.h5'):
+                            granule_url = links['href']
+                    granule_arr.append([granule_url, granule_size, granule_poly])
+
+                page_num += 1
+            else:
+                break
+
+        # adding bound as the last row into the dataframe
+        # we will use this later in the plot
+        granule_arr.append(['GRSM', 0, grsm_epsg4326.geometry.item()])
+
+        # creating a pandas dataframe
+        l4adf = gpd.GeoDataFrame(granule_arr, columns=["granule_url", "granule_size", "granule_poly"])
+
+        # Drop granules with empty geometry
+        l4adf = l4adf[l4adf['granule_poly'] != '']
+
+        print("Total L4A granules found: ", len(l4adf.index) - 1)
+        print("Total file size (MB): ", '{0:,.2f}'.format(l4adf['granule_size'].sum()))
+        granule_list = [f'{x}\n' for x in l4adf['granule_url'] if '.h5' in x]
+        if out_file:
+            # Export to CSV
+            with open(out_file, 'w') as f:
+                f.writelines(granule_list)
+        else:
+            return granule_list
 
 
 # overriding requests.Session.rebuild_auth to mantain headers when redirected
