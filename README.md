@@ -1,2 +1,6 @@
 # GediSaber
-Python package for analyzing GEDI data. GEDI is a LiDAR dataset from NASA that is acquired using the International Space Station.
+Python package for GEDI processing.
+
+## Acknowledgements
+Code and workflow is largely atttributed to NASA LPDAAC [E-Learning modules](https://lpdaac.usgs.gov/resources/e-learning/).
+This package just organizes their Jupyter notebooks into a usable Python package.

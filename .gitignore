@@ -1,7 +1,22 @@
+*.html
+*.csv
+*.h5
+*.txt
+demo.py
+.idea/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Geospatial data
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.geojson
 
 # C extensions
 *.so
