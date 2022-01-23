@@ -9,7 +9,6 @@
 ---------------------------------------------------------------------------------------------------
 """
 import os
-# Load necessary packages into Python
 from getpass import getpass
 
 import geopandas as gpd
@@ -103,7 +102,7 @@ class GediFinder:
             print(
                 requests.get(f"{self.base_url}{self.concept_ids[product]}&bounding_box={self.bbox.replace(' ', '')}&pageNum={page}").json())
 
-    def download(self, product, output_folder, username: str, password=None):
+    def download(self, product, output_folder, username: str, password=None, auto_confirm=True):
         """
         Download GEDI data
 
@@ -122,12 +121,22 @@ class GediFinder:
         else:
             granules = self.search(product)
 
-        for item in granules:
+        confirm = input('Proceed with download? [Y/n]')
+        if auto_confirm is False:
+            if confirm == 'Y':
+                pass
+            elif confirm == 'n':
+                return
+            else:
+                print('Unknown input', f"{confirm}")
+                return
+
+        for i, item in enumerate(granules, start=1):
             url = item.split('.h5')[0] + '.h5'
             filename = url[url.rfind('/') + 1:]
             try:
                 # submit the request using the session
-                print('Downloading', url)
+                print(f'Downloading [{i}/{len(granules)}]:', url)
                 session = SessionWithHeaderRedirection(username, password)
                 response = session.get(url, stream=True)
                 if response.status_code != 200:
@@ -144,7 +153,6 @@ class GediFinder:
             except requests.exceptions.HTTPError as e:
                 # handle any errors here
                 print(e)
-            break
 
         return
 
