@@ -123,11 +123,12 @@ class GediFinder:
             #     requests.get(f"{self.base_url}{self.concept_ids[product]}&bounding_box={self.bbox.replace(' ', '')}&pageNum={page}").json())
             traceback.print_exc()
 
-    def download(self, product, output_folder, username: str, password=None, auto_confirm=True):
+    def download(self, product, date_range, output_folder, username: str, password=None, auto_confirm=True):
         """
         Download GEDI data
 
         :param product: Type of GEDI product [L1B, L2A, L2B, L4A]
+        :param date_range: Filter for date range in format ('YYYY-MM-DD', 'YYYY-MM-DD')
         :param output_folder: Folder to save downloaded GEDI data
         :param username: Username for NASA Earthdata
         :param password: Password for NASA Earthdata. Leave empty for hidden input.
@@ -138,9 +139,9 @@ class GediFinder:
             password = getpass()
 
         if product == 'L4A':
-            granules = self._search_L4A()
+            granules = self._search_L4A(date_range=date_range)
         else:
-            granules = self.search(product)
+            granules = self.search(product, date_range)
 
         confirm = input('Proceed with download? [Y/n]')
         if auto_confirm is False:

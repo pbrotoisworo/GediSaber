@@ -346,6 +346,9 @@ class L4A:
         self.data = h5py.File(h5_file, 'r')
 
     def subset(self, aoi, output_file, overwrite=False):
+
+        aoi = gpd.GeoDataFrame.from_file(aoi)
+
         # Create a subset if it doesn't exist or overwrite is True
         if (os.path.exists(output_file) and overwrite is True) or \
                 os.path.exists(output_file) is False:
