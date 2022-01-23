@@ -1,12 +1,18 @@
 import os
 import warnings
 
-import h5py
-import numpy as np
 import geopandas as gpd
 import geoviews as gv
-from geoviews import opts, tile_sources as gvts
+import h5py
 import holoviews as hv
+import numpy as np
+from geoviews import tile_sources as gvts
+
+from .common.l2 import (
+    load_beam_data, load_metadata, gedi_orbit, create_gv_points
+)
+from .common.utils import point_visual, save_as_html
+
 gv.extension('bokeh', 'matplotlib')
 
 
@@ -26,13 +32,14 @@ class L2B:
         self._verbose = verbose
 
         # Load metadata
-        self.beams = self._load_beam_data()
-        self.metadata = self._load_metadata()
+        self.beams = load_beam_data(self.data)
+        self.metadata = load_metadata(self.data)
 
         # Get data objects
         self._data_objs = []
         self.data.visit(self._data_objs.append)  # Retrieve list of datasets
         self._gediSDS = [o for o in self._data_objs if isinstance(self.data[o], h5py.Dataset)]
+        self._beamSDS = None
 
     def spatial_visualization(self, aoi, aoi_simplify_tolerance=0.001, add_aoi_to_webmap=False, fig_titles=None):
 
@@ -56,16 +63,16 @@ class L2B:
         if self._verbose:
             print('Loading all beam data...')
         for b in beamNames:
-            [shotNum.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith('/shot_number') and b in g][0]][()]]
-            [dem.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith('/digital_elevation_model') and b in g][0]][()]]
-            [zElevation.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith('/elev_lowestmode') and b in g][0]][()]]
-            [zHigh.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith('/elev_highestreturn') and b in g][0]][()]]
-            [zLat.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith('/lat_lowestmode') and b in g][0]][()]]
-            [zLon.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith('/lon_lowestmode') and b in g][0]][()]]
-            [canopyHeight.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith('/rh100') and b in g][0]][()]]
-            [quality.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith('/l2b_quality_flag') and b in g][0]][()]]
-            [degrade.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith('/degrade_flag') and b in g][0]][()]]
-            [sensitivity.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith('/sensitivity') and b in g][0]][()]]
+            shotNum = self._load_sds_all_beams(shotNum, b, '/shot_number')
+            dem = self._load_sds_all_beams(dem, b, '/digital_elevation_model')
+            zElevation = self._load_sds_all_beams(zElevation, b, '/elev_lowestmode')
+            zHigh = self._load_sds_all_beams(zHigh, b, '/elev_highestreturn')
+            zLat = self._load_sds_all_beams(zLat, b, '/lat_lowestmode')
+            zLon = self._load_sds_all_beams(zLon, b, '/lon_lowestmode')
+            canopyHeight = self._load_sds_all_beams(canopyHeight, b, '/rh100')
+            quality = self._load_sds_all_beams(quality, b, '/l2b_quality_flag')
+            degrade = self._load_sds_all_beams(degrade, b, '/degrade_flag')
+            sensitivity = self._load_sds_all_beams(sensitivity, b, '/sensitivity')
             [beamI.append(h) for h in [b] * len(self.data[[g for g in self._gediSDS if g.endswith('/shot_number') and b in g][0]][()])]
             [pai.append(h) for h in self.data[f'{b}/pai'][()]]
 
@@ -100,72 +107,46 @@ class L2B:
         if self._verbose:
             print('Generating geo webmaps...')
 
+        # Set basemap which will be used for all maps
+        basemap = gvts.EsriImagery
+
         title = fig_titles.get('geo_CanopyHeight') if fig_titles.get('geo_CanopyHeight') else \
             default_fig_titles.get('geo_CanopyHeight')
-        webmap = (gvts.EsriImagery * gv.Points(allDF, vdims=vdims).options(color='Canopy Height (rh100)',cmap='plasma', size=3, tools=['hover'],
-                                                          clim=(0,102), colorbar=True, clabel='Meters',
-                                                          title=title,
-                                                          fontsize={'xticks': 10, 'yticks': 10, 'xlabel':16, 'clabel':12,
-                                                                    'cticks':10,'title':16,'ylabel':16})).options(height=500,
-                                                                                                                  width=900)
+        points = create_gv_points('canopy_height', allDF, vdims, title)
+        webmap = basemap * points
         if aoi and add_aoi_to_webmap:
             webmap = webmap_aoi * webmap
-        self._save_as_html(webmap, 'geo_CanopyHeight')
+        save_as_html(webmap, 'geo_CanopyHeight')
 
         title = fig_titles.get('geo_Elevation') if fig_titles.get('geo_Elevation') else \
             default_fig_titles.get('geo_Elevation')
-        webmap = (gvts.EsriImagery * gv.Points(allDF, vdims=vdims).options(color='Elevation (m)', cmap='terrain', size=3,
-                                                                  tools=['hover'],
-                                                                  clim=(min(allDF['Elevation (m)']),
-                                                                        max(allDF['Elevation (m)'])),
-                                                                  colorbar=True, clabel='Meters',
-                                                                  title=title,
-                                                                  fontsize={'xticks': 10, 'yticks': 10, 'xlabel': 16,
-                                                                            'clabel': 12,
-                                                                            'cticks': 10, 'title': 16,
-                                                                            'ylabel': 16})).options(height=500,
-                                                                                                    width=900)
+        points = create_gv_points('elevation', allDF, vdims, title)
+        webmap = basemap * points
         if aoi and add_aoi_to_webmap:
             webmap *= webmap_aoi
-        self._save_as_html(webmap, 'geo_Elevation')
+        save_as_html(webmap, 'geo_Elevation')
 
         title = fig_titles.get('geo_PlantAreaIndex') if fig_titles.get('geo_PlantAreaIndex') else \
             default_fig_titles.get('geo_PlantAreaIndex')
-        webmap = (gvts.EsriImagery * gv.Points(allDF, vdims=vdims).options(color='Plant Area Index', cmap='Greens', size=3,
-                                                                  tools=['hover'],
-                                                                  clim=(0, 1), colorbar=True, clabel='m2/m2',
-                                                                  title=title,
-                                                                  fontsize={'xticks': 10, 'yticks': 10, 'xlabel': 16,
-                                                                            'clabel': 12,
-                                                                            'cticks': 10, 'title': 16,
-                                                                            'ylabel': 16})).options(height=500,
-                                                                                                    width=900)
+        points = create_gv_points('pai', allDF, vdims, title)
+        webmap = basemap * points
         if aoi and add_aoi_to_webmap:
             webmap *= webmap_aoi
-        self._save_as_html(webmap, 'geo_PlantAreaIndex')
+        save_as_html(webmap, 'geo_PlantAreaIndex')
 
     def generate_transects(self, beam_id, aoi):
 
         # Open all of the desired SDS
-        beamSDS = [g for g in self._gediSDS if beam_id in g]  # Subset to single beam
-
-        dem = self.data[[g for g in beamSDS if g.endswith('/digital_elevation_model')][0]][()]
-        zElevation = self.data[[g for g in beamSDS if g.endswith('/elev_lowestmode')][0]][()]
-        zHigh = self.data[[g for g in beamSDS if g.endswith('/elev_highestreturn')][0]][()]
-        zLat = self.data[[g for g in beamSDS if g.endswith('/lat_lowestmode')][0]][()]
-        zLon = self.data[[g for g in beamSDS if g.endswith('/lon_lowestmode')][0]][()]
-        canopyHeight = self.data[[g for g in beamSDS if g.endswith('/rh100')][0]][()]
-        quality = self.data[[g for g in beamSDS if g.endswith('/l2b_quality_flag')][0]][()]
-        degrade = self.data[[g for g in beamSDS if g.endswith('/degrade_flag')][0]][()]
-        sensitivity = self.data[[g for g in beamSDS if g.endswith('/sensitivity')][0]][()]
+        self._beamSDS = [g for g in self._gediSDS if beam_id in g]  # Subset to single beam
+        canopyHeight = self._load_sds('/rh100')
         pavd = self.data[f'{beam_id}/pavd_z'][()]
         shotNums = self.data[f'{beam_id}/shot_number'][()]
-        dz = self.data[f'{beam_id}/ancillary/dz'][0]  # Get vertical step size
 
         # Create a shot index
         shotIndex = np.arange(shotNums.size)
 
-        canopyHeight = canopyHeight / 100  # Convert RH100 from cm to m
+        # Convert RH100 from cm to m
+        canopyHeight = canopyHeight / 100
 
         # Set up an empty list to append to
         pavdA = []
@@ -180,10 +161,19 @@ class L2B:
 
         # Take the DEM, GEDI-produced Elevation, and Canopy height and add to a Pandas dataframe
         transectDF = gpd.GeoDataFrame(
-            {'Shot Index': shotIndex, 'Shot Number': shotNums, 'Latitude': zLat, 'Longitude': zLon,
-             'Tandem-X DEM': dem, 'Elevation (m)': zElevation, 'Canopy Elevation (m)': zHigh,
-             'Canopy Height (rh100)': canopyHeight, 'Quality Flag': quality, 'Degrade Flag': degrade,
-             'Plant Area Volume Density': pavdA, 'Sensitivity': sensitivity})
+            {'Shot Index': shotIndex,
+             'Shot Number': shotNums,
+             'Latitude': self._load_sds('/lat_lowestmode'),
+             'Longitude': self._load_sds('/lon_lowestmode'),
+             'Tandem-X DEM': self._load_sds('/digital_elevation_model'),
+             'Elevation (m)': self._load_sds('/elev_lowestmode'),
+             'Canopy Elevation (m)': self._load_sds('/elev_highestreturn'),
+             'Canopy Height (rh100)': canopyHeight,
+             'Quality Flag': self._load_sds('/l2b_quality_flag'),
+             'Degrade Flag': self._load_sds('/degrade_flag'),
+             'Plant Area Volume Density': pavdA,
+             'Sensitivity': self._load_sds('/sensitivity')
+             })
         transectDF = transectDF.where(transectDF['Quality Flag'].ne(0))  # Set any poor quality returns to NaN
         transectDF = transectDF.where(transectDF['Degrade Flag'].ne(1))
         transectDF = transectDF.where(transectDF['Sensitivity'] > 0.95)
@@ -205,7 +195,7 @@ class L2B:
         canopyVis.opts(color='darkgreen', height=500, width=900, title=f'GEDI L2B Full Transect {beam_id}',
                        fontsize={'title': 16, 'xlabel': 16, 'ylabel': 16}, size=0.1, xlabel='Shot Index',
                        ylabel='Canopy Height (m)')
-        self._save_as_html(canopyVis, 'transect_CanopyHeightAlongIndex')
+        save_as_html(canopyVis, 'transect_CanopyHeightAlongIndex')
 
         # Plot absolute heights
         # Plot Digital Elevation Model
@@ -223,7 +213,7 @@ class L2B:
         webmap = (demVis * zVis * rhVis).opts(show_legend=True, legend_position='top_left',
                                      fontsize={'title': 15, 'xlabel': 16, 'ylabel': 16},
                                      title=f'{beam_id} Full Transect: {file_basename}')
-        self._save_as_html(webmap, 'transect_ElevationAlongIndex')
+        save_as_html(webmap, 'transect_ElevationAlongIndex')
 
         if self._verbose:
             print('Plotting profile transects')
@@ -233,6 +223,7 @@ class L2B:
         transectDF['Distance'] = distance  # Add Distance as a new column in the dataframe
 
         pavdAll = []
+        dz = self.data[f'{beam_id}/ancillary/dz'][0]  # Get vertical step size
         for j, s in enumerate(transectDF.index):
             pavdShot = transectDF['Plant Area Volume Density'][s]
             elevShot = transectDF['Elevation (m)'][s]
@@ -275,7 +266,7 @@ class L2B:
                   xlabel='Distance Along Transect (m)', ylabel='Elevation (m)', legend_position='bottom_right',
                   fontsize={'title': 15, 'xlabel': 15, 'ylabel': 15, 'xticks': 14, 'yticks': 14, 'legend': 14},
                   title=f'GEDI L2B {beam_id}')
-        self._save_as_html(path, 'transect_ElevationAlongDistance')
+        save_as_html(path, 'transect_ElevationAlongDistance')
 
     def visualize_orbit(self, out_html_path=None, overlay=None, beam_id=None):
         """
@@ -287,34 +278,12 @@ class L2B:
         if not beam_id:
             beam_id = 'BEAM0000'
 
-        lonSample, latSample, shotSample, qualitySample, beamSample = [], [], [], [], []  # Set up lists to store data
-
-        # Open the SDS
-        lats = self.data[f'{beam_id}/geolocation/lat_lowestmode'][()]
-        lons = self.data[f'{beam_id}/geolocation/lon_lowestmode'][()]
-        shots = self.data[f'{beam_id}/geolocation/shot_number'][()]
-        quality = self.data[f'{beam_id}/l2b_quality_flag'][()]
-
-        # Take every 100th shot and append to list
-        for i in range(len(shots)):
-            if i % 100 == 0:
-                shotSample.append(str(shots[i]))
-                lonSample.append(lons[i])
-                latSample.append(lats[i])
-                qualitySample.append(quality[i])
-                beamSample.append(beam_id)
-
-        # Write all of the sample shots to a dataframe
-        latslons = gpd.GeoDataFrame(
-            {'Beam': beamSample, 'Shot Number': shotSample, 'Longitude': lonSample, 'Latitude': latSample,
-             'Quality Flag': qualitySample})
+        latslons = gedi_orbit(self.data, beam_id)
 
         # Take the lat/lon dataframe and convert each lat/lon to a shapely point
-        # latslons['geometry'] = latslons.apply(lambda row: Point(row.Longitude, row.Latitude), axis=1)
         latslons['geometry'] = gpd.points_from_xy(latslons['Longitude'], latslons['Latitude'], crs='EPSG:4326')
 
         # # Convert to a Geodataframe
-        # latslons = gpd.GeoDataFrame(latslons)
         latslons = latslons.drop(columns=['Latitude', 'Longitude'])
 
         # Create a list of geodataframe columns to be included as attributes in the output map
@@ -327,39 +296,14 @@ class L2B:
         out_html_path = out_html_path if out_html_path else 'GEDI_orbit'
         if overlay:
             aoi = gpd.GeoDataFrame.from_file(overlay)  # Import geojson as GeoDataFrame
-            webmap = gv.Polygons(aoi['geometry']).opts(line_color='red', color=None) * self._pointVisual(latslons, vdims=vdims)
-            self._save_as_html(webmap, out_html_path)
+            webmap = gv.Polygons(aoi['geometry']).opts(line_color='red', color=None) * point_visual(latslons, vdims=vdims)
+            save_as_html(webmap, out_html_path)
         else:
-            self._save_as_html(self._pointVisual(latslons, vdims), out_html_path)
+            save_as_html(point_visual(latslons, vdims), out_html_path)
 
-    @staticmethod
-    def _save_as_html(gv_obj, out_path):
-        if out_path.endswith('.html'):
-            out_path = out_path.rstrip('.html')
-        render = gv.renderer('bokeh')
-        render.save(gv_obj, out_path)
+    def _load_sds(self, target):
+        return self.data[[g for g in self._beamSDS if g.endswith(target)][0]][()]
 
-    @staticmethod
-    def _pointVisual(features, vdims):
-        """Function for visualizing GEDI points"""
-        return (gvts.EsriImagery * gv.Points(features, vdims=vdims).options(tools=['hover'], height=500, width=900,
-                                                                            size=5,
-                                                                            color='yellow',
-                                                                            fontsize={'xticks': 10, 'yticks': 10,
-                                                                                      'xlabel': 16, 'ylabel': 16}))
-
-    def _load_beam_data(self):
-        beam_list = [g for g in self.data.keys() if g.startswith('BEAM')]
-        beams = {beam:{} for beam in beam_list}
-        for beam_id in beam_list:
-            power = self.data[beam_id].attrs['description']
-            beams[beam_id]['POWER'] = 'FULL' if 'Full' in power else 'COVERAGE'
-        return beams
-
-    def _load_metadata(self):
-        metadata = {}
-        h5_data = self.data['METADATA']['DatasetIdentification']
-        for attribute in h5_data.attrs:
-            metadata[attribute] = h5_data.attrs[attribute]
-
-        return metadata
+    def _load_sds_all_beams(self, lst, val, target):
+        [lst.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith(target) and val in g][0]][()]]
+        return lst
