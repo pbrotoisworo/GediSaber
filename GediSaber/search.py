@@ -9,6 +9,7 @@
 ---------------------------------------------------------------------------------------------------
 """
 import os
+import traceback
 from getpass import getpass
 
 import geopandas as gpd
@@ -50,21 +51,21 @@ class GediFinder:
 
         return ','.join([str(x) for x in df.total_bounds])
 
-    def search(self, product, out_file=None):
+    def search(self, product: str, date_range=None, out_file=None):
         """
         Get GEDI granules
 
         :param product: Type of GEDI to search for
+        :param date_range: Filter for date range in format ('YYYY-MM-DD', 'YYYY-MM-DD')
         :param out_file: Granule URLs will be saved in a txt file
         :return:
         """
 
         if product == 'L4A':
-            return self._search_L4A(out_file)
+            return self._search_L4A(date_range, out_file)
         else:
             product_str = product
             product = self.gedi_products[product]
-
         page = 1
         try:
             # Send GET request to CMR granule search endpoint w/ product concept ID,
@@ -82,25 +83,45 @@ class GediFinder:
 
             # CMR returns more info than just the Data Pool links, below use list
             # comprehension to return a list of DP links
-            granule_size = [float(x['granule_size']) for x in cmr_response]
-            granule_urls = [c['links'][0]['href'] for c in cmr_response]
-            granule_urls = [x for x in granule_urls if x.endswith('.h5')]
 
-            print(f"Total {product_str} granules found: ", len(granule_urls))
-            print("Total file size (MB): ", '{0:,.2f}'.format(sum(granule_size)))
+            granule_sizes = []
+            granule_urls = []
+            granule_datetimes = []
+            if cmr_response:
+                for item in cmr_response:
+                    # Get file size
+                    granule_sizes.append(float(item['granule_size']))
+                    # Get URL
+                    granule_urls.append(item['links'][0]['href'])
+                    # Get datetime
+                    granule_datetimes.append(item['time_start'])
+
+            df_granule = gpd.GeoDataFrame({
+                'date': granule_datetimes,
+                'url': granule_urls,
+                'size': granule_sizes
+            })
+
+            # Filter datetime
+            if date_range:
+                df_granule = df_granule[(df_granule['date'] > date_range[0]) & (df_granule['date'] < date_range[1])]
+
+            print(f"Total {product_str} granules found: ", len(df_granule))
+            print("Total file size (MB): ", '{0:,.2f}'.format(df_granule['size'].sum()))
 
             if not out_file:
-                return granule_urls
+                return df_granule['url'].to_list()
             else:
                 # Open file and write each granule link on a new line
                 with open(out_file, "w") as gf:
-                    for g in granule_urls:
+                    for g in df_granule['url'].to_list():
                         gf.write(f"{g}\n")
 
-        except:
+        except Exception as e:
             # If the request did not complete successfully, print out the response from CMR
-            print(
-                requests.get(f"{self.base_url}{self.concept_ids[product]}&bounding_box={self.bbox.replace(' ', '')}&pageNum={page}").json())
+            # print(
+            #     requests.get(f"{self.base_url}{self.concept_ids[product]}&bounding_box={self.bbox.replace(' ', '')}&pageNum={page}").json())
+            traceback.print_exc()
 
     def download(self, product, output_folder, username: str, password=None, auto_confirm=True):
         """
@@ -156,7 +177,7 @@ class GediFinder:
 
         return
 
-    def _search_L4A(self, out_file=None):
+    def _search_L4A(self, date_range=None, out_file=None):
         # converting to WGS84 coordinate system
         grsm_poly = gpd.read_file(self.geom)
         grsm_epsg4326 = grsm_poly.to_crs(epsg=4326)
@@ -204,6 +225,7 @@ class GediFinder:
 
                     # read file size
                     granule_size = float(g['granule_size'])
+                    granule_datetime = g['time_start']
 
                     # reading bounding geometries
                     if 'polygons' in g:
@@ -221,7 +243,7 @@ class GediFinder:
                         if 'title' in links and links['title'].startswith('Download') \
                                 and links['title'].endswith('.h5'):
                             granule_url = links['href']
-                    granule_arr.append([granule_url, granule_size, granule_poly])
+                    granule_arr.append([granule_datetime, granule_url, granule_size, granule_poly])
 
                 page_num += 1
             else:
@@ -232,10 +254,13 @@ class GediFinder:
         granule_arr.append(['GRSM', 0, grsm_epsg4326.geometry.item()])
 
         # creating a pandas dataframe
-        l4adf = gpd.GeoDataFrame(granule_arr, columns=["granule_url", "granule_size", "granule_poly"])
+        l4adf = gpd.GeoDataFrame(granule_arr, columns=["granule_date", "granule_url", "granule_size", "granule_poly"])
 
         # Drop granules with empty geometry
         l4adf = l4adf[l4adf['granule_poly'] != '']
+
+        if date_range:
+            l4adf = l4adf[(l4adf['granule_date'] > date_range[0]) & (l4adf['granule_date'] < date_range[1])]
 
         print("Total L4A granules found: ", len(l4adf.index) - 1)
         print("Total file size (MB): ", '{0:,.2f}'.format(l4adf['granule_size'].sum()))
