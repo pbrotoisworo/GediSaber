@@ -1,17 +1,20 @@
 import os
 import warnings
 
+import contextily as ctx
 import geopandas as gpd
 import geoviews as gv
 import h5py
 import holoviews as hv
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from geoviews import tile_sources as gvts
 
 from .common.l2 import (
     load_beam_data, load_metadata, gedi_orbit, create_gv_points
 )
-from .common.utils import point_visual, save_as_html
+from .common.utils import point_visual, save_as_html, create_gdf_from_multi_h5, subset
 
 gv.extension('bokeh', 'matplotlib')
 
@@ -53,11 +56,20 @@ class L2B:
             fig_titles = default_fig_titles
 
         beamNames = [g for g in self.data.keys() if g.startswith('BEAM')]
+
         # Set up lists to store data
-        shotNum, dem, zElevation, zHigh, zLat, zLon, canopyHeight, quality, degrade, sensitivity, pai, beamI = ([] for i
-                                                                                                                in
-                                                                                                                range(
-                                                                                                                    12))
+        shotNum = []
+        dem = []
+        zElevation = []
+        zHigh = []
+        zLat = []
+        zLon = []
+        canopyHeight = []
+        quality = []
+        degrade = []
+        sensitivity = []
+        pai = []
+        beamI = []
 
         # Loop through each beam and open the SDS needed
         if self._verbose:
@@ -78,9 +90,19 @@ class L2B:
 
         # Convert lists to Pandas dataframe
         allDF = gpd.GeoDataFrame(
-            {'Shot Number': shotNum, 'Beam': beamI, 'Latitude': zLat, 'Longitude': zLon, 'Tandem-X DEM': dem,
-             'Elevation (m)': zElevation, 'Canopy Elevation (m)': zHigh, 'Canopy Height (rh100)': canopyHeight,
-             'Quality Flag': quality, 'Plant Area Index': pai, 'Degrade Flag': degrade, 'Sensitivity': sensitivity})
+            {'Shot Number': shotNum,
+             'Beam': beamI,
+             'Latitude': zLat,
+             'Longitude': zLon,
+             'Tandem-X DEM': dem,
+             'Elevation (m)': zElevation,
+             'Canopy Elevation (m)': zHigh,
+             'Canopy Height (rh100)': canopyHeight,
+             'Quality Flag': quality,
+             'Plant Area Index': pai,
+             'Degrade Flag': degrade,
+             'Sensitivity': sensitivity
+             })
 
         if aoi:
             aoiDF = gpd.GeoDataFrame.from_file(aoi)
@@ -307,3 +329,67 @@ class L2B:
     def _load_sds_all_beams(self, lst, val, target):
         [lst.append(h) for h in self.data[[g for g in self._gediSDS if g.endswith(target) and val in g][0]][()]]
         return lst
+
+
+class L4A:
+
+    def __init__(self, h5_file, verbose=True):
+        """
+        Class for handling GEDI L4A data.
+        Code from: https://github.com/ornldaac/gedi_tutorials/blob/main/2_gedi_l4a_subsets.ipynb
+
+        :param h5_file: Path of H5 file
+        :param verbose: Show log statements
+        """
+        self._verbose = verbose
+        self._h5_file = h5_file
+        self.data = h5py.File(h5_file, 'r')
+
+    def subset(self, aoi, output_file, overwrite=False):
+        # Create a subset if it doesn't exist or overwrite is True
+        if (os.path.exists(output_file) and overwrite is True) or \
+                os.path.exists(output_file) is False:
+            subset(self.data, aoi, output_file)
+        return output_file
+
+    @classmethod
+    def extract_agbd_multipass(cls, h5_dir, aoi, output_dir):
+        """
+        Class method for extracting AGBD.
+
+        :param h5_dir: Path containing all h5 data to use for AGBD analysis
+        :param aoi: AOI used to clip data
+        :param output_dir: Directory to save output figures and GIS data
+        :return:
+        """
+
+        # Create GDF from all available h5 data
+        gdf = create_gdf_from_multi_h5(h5_dir)
+
+        aoi = gpd.GeoDataFrame.from_file(aoi)
+
+        grsm_df = gpd.GeoDataFrame([[-9999, -9999, 0, -9999, -9999, aoi.geometry.item()]],
+                               columns=["agbd", "agbd_se", "l4_quality_flag", "lat_lowestmode", "lon_lowestmode",
+                                        "geometry"])
+        gdf = pd.concat([gdf, grsm_df])
+        gdf.crs = "EPSG:4326"
+        gdf_out = gdf.to_crs(epsg=3857)  # 3857 (Web Mercator) for map figure
+        ax4 = gdf_out[-1:].plot(color='white', edgecolor='red', alpha=0.3, linewidth=5, figsize=(22, 7))
+        gdf_out[gdf_out['agbd'] != -9999][:-1].plot(ax=ax4, column='agbd', alpha=0.1, linewidth=0,
+                                                              legend=True)
+        ctx.add_basemap(ax4)
+        output_fig = os.path.join(output_dir, 'agbd.png')
+        plt.savefig(output_fig)
+
+        # AGBD Standard Error of Prediction
+        ax4 = gdf_out[-1:].plot(color='white', edgecolor='red', alpha=0.3, linewidth=5, figsize=(22, 7))
+        gdf_out[gdf_out['agbd_se'] != -9999][:-1].plot(ax=ax4, column='agbd_se', alpha=0.1, linewidth=0,
+                                                                 legend=True)
+        ctx.add_basemap(ax4)
+        output_fig = os.path.join(output_dir, 'agbd_se.png')
+        plt.savefig(output_fig)
+
+        geojson_path = os.path.join(output_dir, 'agbd.geojson')
+        gdf_out = gdf_out[gdf_out['agbd'] != -9999][:-1]
+        gdf_out = gdf_out.to_crs(epsg=4326)  # Switch back to 4326 for shapefiles
+        gdf_out.drop(['l4_quality_flag'], axis=1).to_file(geojson_path, driver="GeoJSON")
