@@ -139,3 +139,6 @@ def gedi_orbit(h5_obj, beam_id):
          })
 
     return latslons
+
+if __name__ == '__main__':
+    pass

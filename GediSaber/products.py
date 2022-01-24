@@ -11,10 +11,11 @@ import numpy as np
 import pandas as pd
 from geoviews import tile_sources as gvts
 
-from .common.l2 import (
+from .common.L2 import (
     load_beam_data, load_metadata, gedi_orbit, create_gv_points
 )
-from .common.utils import point_visual, save_as_html, create_gdf_from_multi_h5, subset
+from .common.L4 import agbd_gdf_from_multi_h5
+from .common.utils import point_visual, save_as_html, subset
 
 gv.extension('bokeh', 'matplotlib')
 
@@ -116,6 +117,13 @@ class L2B:
                                                              hover_fill_alpha=0.2,
                                                              height=700,
                                                              width=1000)
+            aoiDF3857 = aoiDF.to_crs(epsg=3857)
+
+        else:
+            aoiDF3857 = None
+            webmap_aoi = None
+
+        allDF3857 = allDF.to_crs(epsg=3857)
 
         allDF['Shot Number'] = allDF['Shot Number'].astype(str)  # Convert shot number to string
 
@@ -127,7 +135,7 @@ class L2B:
         allDF['Canopy Height (rh100)'] = allDF['Canopy Height (rh100)'] / 100  # Convert canopy height from cm to m
 
         if self._verbose:
-            print('Generating geo webmaps...')
+            print('Generating geo webmaps and figures...')
 
         # Set basemap which will be used for all maps
         basemap = gvts.EsriImagery
@@ -136,9 +144,11 @@ class L2B:
             default_fig_titles.get('geo_CanopyHeight')
         points = create_gv_points('canopy_height', allDF, vdims, title)
         webmap = basemap * points
+        # Save webmap
         if aoi and add_aoi_to_webmap:
             webmap = webmap_aoi * webmap
         save_as_html(webmap, 'geo_CanopyHeight')
+        self._save_image(allDF3857, 'Canopy Height (rh100)', 'geo_CanopyHeight.png', 'GEDI Canopy Height', aoiDF3857)
 
         title = fig_titles.get('geo_Elevation') if fig_titles.get('geo_Elevation') else \
             default_fig_titles.get('geo_Elevation')
@@ -147,6 +157,7 @@ class L2B:
         if aoi and add_aoi_to_webmap:
             webmap *= webmap_aoi
         save_as_html(webmap, 'geo_Elevation')
+        self._save_image(allDF3857, 'Canopy Elevation (m)', 'geo_Elevation.png', 'GEDI Canopy Elevation', aoiDF3857)
 
         title = fig_titles.get('geo_PlantAreaIndex') if fig_titles.get('geo_PlantAreaIndex') else \
             default_fig_titles.get('geo_PlantAreaIndex')
@@ -155,6 +166,7 @@ class L2B:
         if aoi and add_aoi_to_webmap:
             webmap *= webmap_aoi
         save_as_html(webmap, 'geo_PlantAreaIndex')
+        self._save_image(allDF3857, 'Plant Area Index', 'geo_PlantAreaIndex.png', 'GEDI Plant Area Index', aoiDF3857)
 
     def generate_transects(self, beam_id, aoi):
 
@@ -295,6 +307,8 @@ class L2B:
         Visualize the path of the GEDI data. Output is HTML file.
 
         :param beam_id: Which ID to use for visualization. If None, it will use 'BEAM0000'.
+        :param out_html_path: Path to save HTML file containing webmap
+        :param overlay: Optionally add polygon to GEDI orbit webmap
         """
 
         if not beam_id:
@@ -315,6 +329,8 @@ class L2B:
                 vdims.append(f)
 
         # Call the function for plotting the GEDI points
+        # Currently creating a orbit figure (.png) creates an image with weird dimensions
+        # So it is just a webmap for now
         out_html_path = out_html_path if out_html_path else 'GEDI_orbit'
         if overlay:
             aoi = gpd.GeoDataFrame.from_file(overlay)  # Import geojson as GeoDataFrame
@@ -322,6 +338,32 @@ class L2B:
             save_as_html(webmap, out_html_path)
         else:
             save_as_html(point_visual(latslons, vdims), out_html_path)
+
+    def _save_image(self, allDF, allDF_col, out_fig_path, fig_title=None, aoiDF=None, target_epsg_code=3857):
+        if aoiDF is not None:
+            crs_aoi = aoiDF.crs.srs
+        crs_all = allDF.crs.srs
+
+        # Check if GDFs are in target EPSG
+        target_epsg_str = f'epsg:{target_epsg_code}'
+        if aoiDF is not None:
+            if crs_aoi != target_epsg_str:
+                aoiDF = aoiDF.to_crs(target_epsg_code)
+        if crs_all != target_epsg_str:
+            allDF = allDF.to_crs(target_epsg_code)
+
+        # Create figures
+        if aoiDF is not None:
+            ax = aoiDF.plot(color='white', edgecolor='red', alpha=0.3, linewidth=5, figsize=(22, 7))
+            allDF.plot(ax=ax, column=allDF_col, alpha=0.1, linewidth=0, legend=True)
+        else:
+            ax = allDF.plot(column=allDF_col, alpha=0.1, linewidth=0, legend=True)
+        ctx.add_basemap(ax)
+
+        # Set up fig and save
+        if fig_title:
+            plt.title(fig_title)
+        plt.savefig(out_fig_path)
 
     def _load_sds(self, target):
         return self.data[[g for g in self._beamSDS if g.endswith(target)][0]][()]
@@ -367,7 +409,7 @@ class L4A:
         """
 
         # Create GDF from all available h5 data
-        gdf = create_gdf_from_multi_h5(h5_dir)
+        gdf = agbd_gdf_from_multi_h5(h5_dir)
 
         aoi = gpd.GeoDataFrame.from_file(aoi)
 
