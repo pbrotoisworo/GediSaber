@@ -46,7 +46,7 @@ def create_gv_points(point_type, allDF, vdims, title):
                                                           'ylabel': 16})
     elif point_type == 'canopy_height':
         points = gv.Points(allDF,
-                           vdims=vdims).options(color='Canopy Height (rh100)',
+                           vdims=vdims).options(color='Canopy Height (canopy_height)',
                                                 cmap='plasma',
                                                 size=3,
                                                 tools=['hover'],
@@ -67,35 +67,6 @@ def create_gv_points(point_type, allDF, vdims, title):
         raise ValueError(f'Unknown point_type argument: "{point_type}"')
 
     return points
-
-def load_beam_data(h5_obj):
-    """
-    Load beam information and information on beam strength
-
-    :param h5_obj: h5 file loaded using h5py package
-    :return:
-    """
-    beam_list = [g for g in h5_obj.keys() if g.startswith('BEAM')]
-    beams = {beam: {} for beam in beam_list}
-    for beam_id in beam_list:
-        power = h5_obj[beam_id].attrs['description']
-        beams[beam_id]['POWER'] = 'FULL' if 'Full' in power else 'COVERAGE'
-    return beams
-
-
-def load_metadata(h5_obj):
-    """
-    Load general GEDI metadata
-
-    :param h5_obj: h5 file loaded using h5py package
-    :return:
-    """
-    metadata = {}
-    h5_data = h5_obj['METADATA']['DatasetIdentification']
-    for attribute in h5_data.attrs:
-        metadata[attribute] = h5_data.attrs[attribute]
-
-    return metadata
 
 
 def gedi_orbit(h5_obj, beam_id):
@@ -139,6 +110,7 @@ def gedi_orbit(h5_obj, beam_id):
          })
 
     return latslons
+
 
 if __name__ == '__main__':
     pass

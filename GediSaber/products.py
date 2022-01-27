@@ -1,5 +1,6 @@
 import os
 import warnings
+from glob import glob
 
 import contextily as ctx
 import geopandas as gpd
@@ -11,13 +12,111 @@ import numpy as np
 import pandas as pd
 from geoviews import tile_sources as gvts
 
-from .common.L2 import (
-    load_beam_data, load_metadata, gedi_orbit, create_gv_points
-)
-from .common.L4 import agbd_gdf_from_multi_h5
-from .common.utils import point_visual, save_as_html, subset
+from .utils.L2 import create_gv_points
+from .utils.sds import SdsDatasets
+from .utils.utils import point_visual, save_as_html, subset, gdf_from_multi_h5, gedi_orbit
 
 gv.extension('bokeh', 'matplotlib')
+
+
+class L2BMulti:
+
+    def __init__(self, h5_dir, verbose=True):
+        """
+        Class to work with multiple L2B data
+
+        :param h5_dir: Path containing L2B data
+        :param verbose: Print statements
+        """
+        self._h5_dir = h5_dir
+        self._verbose = verbose
+
+    def subset(self, aoi, out_dir, overwrite_existing=True):
+        h5_in = glob(os.path.join(self._h5_dir, '*.h5'))
+        aoi = gpd.GeoDataFrame.from_file(aoi)
+        for item in h5_in:
+            outfile = os.path.join(out_dir, os.path.basename(item))
+            if (os.path.exists(outfile) and overwrite_existing) or (not os.path.exists(outfile)):
+                if self._verbose:
+                    print('Generating subset for:', item)
+                subset(item, aoi, outfile, 'L2')
+
+    @staticmethod
+    def run_analysis(aoi, input_dir, output_dir):
+        """
+        Create GeoDataFrame from all h5 files in a directory. GeoDataFrame will consist
+        of point data.
+
+        Included datasets for L2B are plant area index (PAI), canopy height (rh100),
+        canopy elevation, Tandem-X DEM, ground elevation.
+
+        :param aoi: Path of AOI for mask
+        :param input_dir: Path of directory containing h5 files
+        :param output_dir: Path of output files
+        :return:
+        """
+
+        # Load sample data to get path structure
+        sds = SdsDatasets(glob(os.path.join(input_dir, '*.h5'))[0])
+        # Set dataframe columns (keys) and data (values)
+        df_data = {
+                'Tandem-X DEM': sds.search_path('geolocation/digital_elevation_model')[0][8:],
+                'Elevation (m)': sds.search_path('geolocation/elev_lowestmode')[0][8:],
+                'Canopy Elevation (m)': sds.search_path('geolocation/elev_highestreturn')[0][8:],
+                'Canopy Height (m)': sds.search_path('rh100')[0][8:],
+                'Plant Area Index': sds.search_path('pai')[0][8:],
+                'Quality Flag': sds.search_path('l2b_quality_flag')[0][8:],
+                'Longitude': sds.search_path('lon_lowestmode')[0][8:],
+                'Latitude': sds.search_path('lat_lowestmode')[0][8:]
+            }
+
+        gdf = gdf_from_multi_h5(input_dir, df_data)
+
+        # Add AOI to GDF
+        aoi = gpd.GeoDataFrame.from_file(aoi)
+        # Copy original DF column but add -9999 to indicate invalid data
+        df_aoi_data = {k: -9999 for (k, v) in df_data.items()}
+        df_aoi_data['Quality Flag'] = 0
+        df_aoi_data['geometry'] = aoi.geometry.item()
+        grsm_df = gpd.GeoDataFrame([df_aoi_data])
+        # grsm_df = gpd.GeoDataFrame(
+        #     [[-9999, -9999, -9999, -9999, 0, -9999, -9999, aoi.geometry.item()]],
+        #     columns=list(df_data.keys()) + ['geometry'])
+
+        gdf = pd.concat([gdf, grsm_df])
+        gdf.crs = "EPSG:4326"
+        # 3857 (Web Mercator) for map figure
+        gdf_out = gdf.to_crs(epsg=3857)
+        # Convert data in cm unit to meters
+        gdf_out['Canopy Elevation (m)'] = gdf_out['Canopy Elevation (m)'] / 100
+        # Plot AOI
+        ax4 = gdf_out[-1:].plot(color='white', edgecolor='red', alpha=0.3, linewidth=5, figsize=(22, 7))
+
+        # Canopy elevation
+        gdf_out[gdf_out['Canopy Elevation (m)'] != -9999][:-1].plot(ax=ax4,
+                                                                    column='Canopy Elevation (m)',
+                                                                    alpha=0.1,
+                                                                    linewidth=0,
+                                                                    legend=True)
+        ctx.add_basemap(ax4)
+        output_fig = os.path.join(output_dir, 'canopy_elevation.png')
+        plt.title('GEDI Canopy Elevation')
+        plt.savefig(output_fig)
+
+        # PAI
+        ax4 = gdf_out[-1:].plot(color='white', edgecolor='red', alpha=0.3, linewidth=5, figsize=(22, 7))
+        gdf_out[gdf_out['Quality Flag'] != 0][:-1].plot(ax=ax4, column='Plant Area Index', alpha=0.1, linewidth=0,
+                                                        legend=True)
+        ctx.add_basemap(ax4)
+        output_fig = os.path.join(output_dir, 'pai.png')
+        plt.title('Plant Area Index')
+        plt.savefig(output_fig)
+
+        # Create GeoJSON containing all attributes
+        geojson_path = os.path.join(output_dir, 'L2B_combined.geojson')
+        gdf_out = gdf_out[gdf_out['Quality Flag'] != 0][:-1]
+        gdf_out = gdf_out.to_crs(epsg=4326)  # Switch back to 4326 for shapefiles
+        gdf_out.drop(['Quality Flag'], axis=1).to_file(geojson_path, driver="GeoJSON")
 
 
 class L2B:
@@ -34,16 +133,29 @@ class L2B:
         self.data = h5py.File(h5_file, 'r')  # Read file using h5py
         self._h5_file = h5_file
         self._verbose = verbose
+        self.sds = SdsDatasets(self.data)
+        self._h5_paths = self.sds.paths
 
         # Load metadata
-        self.beams = load_beam_data(self.data)
-        self.metadata = load_metadata(self.data)
+        self.level = self.data['METADATA']['DatasetIdentification'].attrs['shortName'].split('_')[1]
+        if self.level != 'L2B':
+            raise ValueError(f'Input data is type {self.level}. Class accepts L2B only.')
 
         # Get data objects
         self._data_objs = []
         self.data.visit(self._data_objs.append)  # Retrieve list of datasets
         self._gediSDS = [o for o in self._data_objs if isinstance(self.data[o], h5py.Dataset)]
         self._beamSDS = None
+
+    def subset(self, aoi, output_file, overwrite=False):
+
+        aoi = gpd.GeoDataFrame.from_file(aoi)
+
+        # Create a subset if it doesn't exist or overwrite is True
+        if (os.path.exists(output_file) and overwrite is True) or \
+                os.path.exists(output_file) is False:
+            subset(self.data, aoi, output_file, 'L2')
+        return output_file
 
     def spatial_visualization(self, aoi, aoi_simplify_tolerance=0.001, add_aoi_to_webmap=False, fig_titles=None):
 
@@ -56,49 +168,52 @@ class L2B:
         if not fig_titles:
             fig_titles = default_fig_titles
 
-        beamNames = [g for g in self.data.keys() if g.startswith('BEAM')]
+        if self._verbose:
+            print('Loading all beam data...')
 
         # Set up lists to store data
-        shotNum = []
+        shot_num = []
         dem = []
-        zElevation = []
-        zHigh = []
-        zLat = []
-        zLon = []
-        canopyHeight = []
+        z_elevation = []
+        z_high = []
+        z_lat = []
+        z_lon = []
+        canopy_height = []
         quality = []
         degrade = []
         sensitivity = []
         pai = []
-        beamI = []
+        beam_i = []
 
-        # Loop through each beam and open the SDS needed
-        if self._verbose:
-            print('Loading all beam data...')
-        for b in beamNames:
-            shotNum = self._load_sds_all_beams(shotNum, b, '/shot_number')
-            dem = self._load_sds_all_beams(dem, b, '/digital_elevation_model')
-            zElevation = self._load_sds_all_beams(zElevation, b, '/elev_lowestmode')
-            zHigh = self._load_sds_all_beams(zHigh, b, '/elev_highestreturn')
-            zLat = self._load_sds_all_beams(zLat, b, '/lat_lowestmode')
-            zLon = self._load_sds_all_beams(zLon, b, '/lon_lowestmode')
-            canopyHeight = self._load_sds_all_beams(canopyHeight, b, '/rh100')
-            quality = self._load_sds_all_beams(quality, b, '/l2b_quality_flag')
-            degrade = self._load_sds_all_beams(degrade, b, '/degrade_flag')
-            sensitivity = self._load_sds_all_beams(sensitivity, b, '/sensitivity')
-            [beamI.append(h) for h in [b] * len(self.data[[g for g in self._gediSDS if g.endswith('/shot_number') and b in g][0]][()])]
-            [pai.append(h) for h in self.data[f'{b}/pai'][()]]
+        # Loop through all the target SDS and add to list
+        beams = [g for g in self.data.keys() if g.startswith('BEAM')]
+
+        [shot_num.extend(self.sds.elevation(beam)) for beam in beams]
+        [dem.extend(self.sds.dem(beam)) for beam in beams]
+        [z_elevation.extend(self.sds.elevation(beam)) for beam in beams]
+        [z_high.extend(self.sds.canopy_elevation(beam)) for beam in beams]
+        [z_lat.extend(self.sds.latitude(beam)) for beam in beams]
+        [z_lon.extend(self.sds.longitude(beam)) for beam in beams]
+        [canopy_height.extend(self.sds.canopy_height(beam)) for beam in beams]
+        [quality.extend(self.sds.quality_flag(beam, self.level)) for beam in beams]
+        [degrade.extend(self.sds.degrade_flag(beam)) for beam in beams]
+        [sensitivity.extend(self.sds.sensitivity(beam)) for beam in beams]
+        [pai.extend(self.sds.pai(beam)) for beam in beams]
+
+        for b in beams:
+            [beam_i.append(h) for h in
+             [b] * len(self.data[[g for g in self._gediSDS if g.endswith('/shot_number') and b in g][0]][()])]
 
         # Convert lists to Pandas dataframe
         allDF = gpd.GeoDataFrame(
-            {'Shot Number': shotNum,
-             'Beam': beamI,
-             'Latitude': zLat,
-             'Longitude': zLon,
+            {'Shot Number': shot_num,
+             'Beam': beam_i,
+             'Latitude': z_lat,
+             'Longitude': z_lon,
              'Tandem-X DEM': dem,
-             'Elevation (m)': zElevation,
-             'Canopy Elevation (m)': zHigh,
-             'Canopy Height (rh100)': canopyHeight,
+             'Elevation (m)': z_elevation,
+             'Canopy Elevation (m)': z_high,
+             'Canopy Height (m)': canopy_height,
              'Quality Flag': quality,
              'Plant Area Index': pai,
              'Degrade Flag': degrade,
@@ -106,24 +221,27 @@ class L2B:
              })
 
         if aoi:
+            if self._verbose:
+                print('Clipping data to AOI extent...')
             aoiDF = gpd.GeoDataFrame.from_file(aoi)
             allDF['geometry'] = gpd.points_from_xy(allDF['Longitude'], allDF['Latitude'], crs='EPSG:4326')
             allDF = gpd.clip(allDF, aoiDF).drop(['Longitude', 'Latitude'], axis=1)
             if aoi_simplify_tolerance:
-                aoiDF['geometry'] = aoiDF['geometry'].simplify(aoi_simplify_tolerance).buffer(0)  # Simplify geometry for webmap
+                # Simplify geometry for faster webmap visualization
+                aoiDF['geometry'] = aoiDF['geometry'].simplify(aoi_simplify_tolerance).buffer(0)
             webmap_aoi = gv.Polygons(aoiDF['geometry']).opts(line_color='red',
                                                              fill_color='red',
                                                              fill_alpha=0.4,
                                                              hover_fill_alpha=0.2,
                                                              height=700,
                                                              width=1000)
-            aoiDF3857 = aoiDF.to_crs(epsg=3857)
+            aoi_df3857 = aoiDF.to_crs(epsg=3857)
 
         else:
-            aoiDF3857 = None
+            aoi_df3857 = None
             webmap_aoi = None
 
-        allDF3857 = allDF.to_crs(epsg=3857)
+        all_df3857 = allDF.to_crs(epsg=3857)
 
         allDF['Shot Number'] = allDF['Shot Number'].astype(str)  # Convert shot number to string
 
@@ -132,7 +250,8 @@ class L2B:
             if f not in ['geometry']:
                 vdims.append(f)
 
-        allDF['Canopy Height (rh100)'] = allDF['Canopy Height (rh100)'] / 100  # Convert canopy height from cm to m
+        # Convert canopy height from cm to m
+        allDF['Canopy Height (m)'] = allDF['Canopy Height (m)'] / 100
 
         if self._verbose:
             print('Generating geo webmaps and figures...')
@@ -148,7 +267,7 @@ class L2B:
         if aoi and add_aoi_to_webmap:
             webmap = webmap_aoi * webmap
         save_as_html(webmap, 'geo_CanopyHeight')
-        self._save_image(allDF3857, 'Canopy Height (rh100)', 'geo_CanopyHeight.png', 'GEDI Canopy Height', aoiDF3857)
+        self._save_image(all_df3857, 'Canopy Height (m)', 'geo_CanopyHeight.png', 'GEDI Canopy Height', aoi_df3857)
 
         title = fig_titles.get('geo_Elevation') if fig_titles.get('geo_Elevation') else \
             default_fig_titles.get('geo_Elevation')
@@ -157,7 +276,7 @@ class L2B:
         if aoi and add_aoi_to_webmap:
             webmap *= webmap_aoi
         save_as_html(webmap, 'geo_Elevation')
-        self._save_image(allDF3857, 'Canopy Elevation (m)', 'geo_Elevation.png', 'GEDI Canopy Elevation', aoiDF3857)
+        self._save_image(all_df3857, 'Canopy Elevation (m)', 'geo_Elevation.png', 'GEDI Canopy Elevation', aoi_df3857)
 
         title = fig_titles.get('geo_PlantAreaIndex') if fig_titles.get('geo_PlantAreaIndex') else \
             default_fig_titles.get('geo_PlantAreaIndex')
@@ -166,24 +285,20 @@ class L2B:
         if aoi and add_aoi_to_webmap:
             webmap *= webmap_aoi
         save_as_html(webmap, 'geo_PlantAreaIndex')
-        self._save_image(allDF3857, 'Plant Area Index', 'geo_PlantAreaIndex.png', 'GEDI Plant Area Index', aoiDF3857)
+        self._save_image(all_df3857, 'Plant Area Index', 'geo_PlantAreaIndex.png', 'GEDI Plant Area Index', aoi_df3857)
 
-    def generate_transects(self, beam_id, aoi):
+    def generate_transects(self, beam_id: str, aoi):
 
         # Open all of the desired SDS
-        self._beamSDS = [g for g in self._gediSDS if beam_id in g]  # Subset to single beam
-        canopyHeight = self._load_sds('/rh100')
-        pavd = self.data[f'{beam_id}/pavd_z'][()]
-        shotNums = self.data[f'{beam_id}/shot_number'][()]
-
+        pavd = self.sds.pavd_z(beam_id)
+        # Get canopy height (rh100) and convert from cm to m
+        canopy_height = self.sds.canopy_height(beam_id) / 100
+        shot_nums = self.sds.shot_number(beam_id)
         # Create a shot index
-        shotIndex = np.arange(shotNums.size)
-
-        # Convert RH100 from cm to m
-        canopyHeight = canopyHeight / 100
+        shot_index = np.arange(shot_nums.size)
 
         # Set up an empty list to append to
-        pavdA = []
+        pavd_a = []
         for i in range(len(pavd)):
 
             # If any of the values are fill value, set to nan
@@ -191,41 +306,41 @@ class L2B:
             for p in range(len(pavd[i])):
                 if pavd[i][p] != -9999:
                     pavdF.append(pavd[i][p])  # If the value is not fill value, append to list
-            pavdA.append(pavdF)  # Append back to master list
+            pavd_a.append(pavdF)  # Append back to master list
 
         # Take the DEM, GEDI-produced Elevation, and Canopy height and add to a Pandas dataframe
-        transectDF = gpd.GeoDataFrame(
-            {'Shot Index': shotIndex,
-             'Shot Number': shotNums,
-             'Latitude': self._load_sds('/lat_lowestmode'),
-             'Longitude': self._load_sds('/lon_lowestmode'),
-             'Tandem-X DEM': self._load_sds('/digital_elevation_model'),
-             'Elevation (m)': self._load_sds('/elev_lowestmode'),
-             'Canopy Elevation (m)': self._load_sds('/elev_highestreturn'),
-             'Canopy Height (rh100)': canopyHeight,
-             'Quality Flag': self._load_sds('/l2b_quality_flag'),
-             'Degrade Flag': self._load_sds('/degrade_flag'),
-             'Plant Area Volume Density': pavdA,
-             'Sensitivity': self._load_sds('/sensitivity')
+        transect_df = gpd.GeoDataFrame(
+            {'Shot Index': shot_index,
+             'Shot Number': shot_nums,
+             'Latitude': self.sds.latitude(beam_id),
+             'Longitude': self.sds.longitude(beam_id),
+             'Tandem-X DEM': self.sds.dem(beam_id),
+             'Elevation (m)': self.sds.elevation(beam_id),
+             'Canopy Elevation (m)': self.sds.canopy_elevation(beam_id),
+             'Canopy Height (canopy_height)': canopy_height,
+             'Quality Flag': self.sds.quality_flag(beam_id, self.level),
+             'Degrade Flag': self.sds.degrade_flag(beam_id),
+             'Plant Area Volume Density': pavd_a,
+             'Sensitivity': self.sds.sensitivity(beam_id)
              })
-        transectDF = transectDF.where(transectDF['Quality Flag'].ne(0))  # Set any poor quality returns to NaN
-        transectDF = transectDF.where(transectDF['Degrade Flag'].ne(1))
-        transectDF = transectDF.where(transectDF['Sensitivity'] > 0.95)
-        transectDF = transectDF.dropna()  # Drop all of the rows (shots) that did not pass the quality filtering above
+        transect_df = transect_df.where(transect_df['Quality Flag'].ne(0))  # Set any poor quality returns to NaN
+        transect_df = transect_df.where(transect_df['Degrade Flag'].ne(1))
+        transect_df = transect_df.where(transect_df['Sensitivity'] > 0.95)
+        transect_df = transect_df.dropna()  # Drop all of the rows (shots) that did not pass the quality filtering above
 
         if aoi:
             aoiDF = gpd.GeoDataFrame.from_file(aoi)
-            transectDF['geometry'] = gpd.points_from_xy(
-                x=transectDF['Longitude'],
-                y=transectDF['Latitude'],
+            transect_df['geometry'] = gpd.points_from_xy(
+                x=transect_df['Longitude'],
+                y=transect_df['Latitude'],
                 crs='EPSG:4326'
             )
-            transectDF = gpd.clip(transectDF, aoiDF).drop(['geometry'], axis=1)
+            transect_df = gpd.clip(transect_df, aoiDF).drop(['geometry'], axis=1)
             if self._verbose:
-                print('Clipped dataframe size:', len(transectDF))
+                print('Clipped dataframe size:', len(transect_df))
 
         # Plot Canopy Height
-        canopyVis = hv.Scatter((transectDF['Shot Index'], transectDF['Canopy Height (rh100)']))
+        canopyVis = hv.Scatter((transect_df['Shot Index'], transect_df['Canopy Height (canopy_height)']))
         canopyVis.opts(color='darkgreen', height=500, width=900, title=f'GEDI L2B Full Transect {beam_id}',
                        fontsize={'title': 16, 'xlabel': 16, 'ylabel': 16}, size=0.1, xlabel='Shot Index',
                        ylabel='Canopy Height (m)')
@@ -233,70 +348,71 @@ class L2B:
 
         # Plot absolute heights
         # Plot Digital Elevation Model
-        demVis = hv.Scatter((transectDF['Shot Index'], transectDF['Tandem-X DEM']), label='Tandem-X DEM')
-        demVis = demVis.opts(color='black', height=500, width=900, fontsize={'xlabel': 16, 'ylabel': 16}, size=1.5)
+        dem_vis = hv.Scatter((transect_df['Shot Index'], transect_df['Tandem-X DEM']), label='Tandem-X DEM')
+        dem_vis = dem_vis.opts(color='black', height=500, width=900, fontsize={'xlabel': 16, 'ylabel': 16}, size=1.5)
         # Plot GEDI-Retrieved Elevation
-        zVis = hv.Scatter((transectDF['Shot Index'], transectDF['Elevation (m)']), label='GEDI-derived Elevation')
-        zVis = zVis.opts(color='saddlebrown', height=500, width=900, fontsize={'xlabel': 16, 'ylabel': 16}, size=1.5)
+        z_vis = hv.Scatter((transect_df['Shot Index'], transect_df['Elevation (m)']), label='GEDI-derived Elevation')
+        z_vis = z_vis.opts(color='saddlebrown', height=500, width=900, fontsize={'xlabel': 16, 'ylabel': 16}, size=1.5)
         # Plot Canopy Top Elevation
-        rhVis = hv.Scatter((transectDF['Shot Index'], transectDF['Canopy Elevation (m)']), label='Canopy Top Elevation')
-        rhVis = rhVis.opts(color='darkgreen', height=500, width=900, fontsize={'xlabel': 16, 'ylabel': 16}, size=1.5,
-                           tools=['hover'], xlabel='Shot Index', ylabel='Elevation (m)')
+        rh_vis = hv.Scatter((transect_df['Shot Index'], transect_df['Canopy Elevation (m)']),
+                            label='Canopy Top Elevation')
+        rh_vis = rh_vis.opts(color='darkgreen', height=500, width=900, fontsize={'xlabel': 16, 'ylabel': 16}, size=1.5,
+                             tools=['hover'], xlabel='Shot Index', ylabel='Elevation (m)')
         # Combine all three scatterplots
         file_basename = os.path.basename(self._h5_file).split('.')[0]
-        webmap = (demVis * zVis * rhVis).opts(show_legend=True, legend_position='top_left',
-                                     fontsize={'title': 15, 'xlabel': 16, 'ylabel': 16},
-                                     title=f'{beam_id} Full Transect: {file_basename}')
+        webmap = (dem_vis * z_vis * rh_vis).opts(show_legend=True, legend_position='top_left',
+                                                 fontsize={'title': 15, 'xlabel': 16, 'ylabel': 16},
+                                                 title=f'{beam_id} Full Transect: {file_basename}')
         save_as_html(webmap, 'transect_ElevationAlongIndex')
 
         if self._verbose:
             print('Plotting profile transects')
 
         # Calculate along-track distance
-        distance = np.arange(0.0, len(transectDF.index) * 60, 60)  # GEDI Shots are spaced 60 m apart
-        transectDF['Distance'] = distance  # Add Distance as a new column in the dataframe
+        distance = np.arange(0.0, len(transect_df.index) * 60, 60)  # GEDI Shots are spaced 60 m apart
+        transect_df['Distance'] = distance  # Add Distance as a new column in the dataframe
 
-        pavdAll = []
+        pavd_all = []
         dz = self.data[f'{beam_id}/ancillary/dz'][0]  # Get vertical step size
-        for j, s in enumerate(transectDF.index):
-            pavdShot = transectDF['Plant Area Volume Density'][s]
-            elevShot = transectDF['Elevation (m)'][s]
-            pavdElev = []
+        for j, s in enumerate(transect_df.index):
+            pavd_shot = transect_df['Plant Area Volume Density'][s]
+            elev_shot = transect_df['Elevation (m)'][s]
+            pavd_elev = []
 
             # Remove fill values
-            if np.isnan(pavdShot).all():
+            if np.isnan(pavd_shot).all():
                 continue
             else:
-                del pavdShot[0]
-            for i, e in enumerate(range(len(pavdShot))):
-                if pavdShot[i] > 0:
-                    pavdElev.append(
-                        (distance[j], elevShot + dz * i,
-                         pavdShot[i]))  # Append tuple of distance, elevation, and PAVD
-            pavdAll.append(pavdElev)  # Append to final list
+                del pavd_shot[0]
+            for i, e in enumerate(range(len(pavd_shot))):
+                if pavd_shot[i] > 0:
+                    pavd_elev.append(
+                        (distance[j], elev_shot + dz * i,
+                         pavd_shot[i]))  # Append tuple of distance, elevation, and PAVD
+            pavd_all.append(pavd_elev)  # Append to final list
 
-        canopyElevation = [p[-1][1] for p in
-                           pavdAll]  # Grab the canopy elevation by selecting the last value in each PAVD
+        canopy_elevation = [p[-1][1] for p in
+                           pavd_all]  # Grab the canopy elevation by selecting the last value in each PAVD
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            path1 = hv.Path(pavdAll, vdims='PAVD').options(color='PAVD', clim=(0, 0.3), cmap='Greens', line_width=8,
-                                                           colorbar=True,
-                                                           width=950, height=500, clabel='PAVD',
-                                                           xlabel='Distance Along Transect (m)',
-                                                           ylabel='Elevation (m)',
-                                                           fontsize={'title': 16, 'xlabel': 16, 'ylabel': 16,
-                                                                     'xticks': 12, 'yticks': 12,
-                                                                     'clabel': 12, 'cticks': 10})
+            path1 = hv.Path(pavd_all, vdims='PAVD').options(color='PAVD', clim=(0, 0.3), cmap='Greens', line_width=8,
+                                                            colorbar=True,
+                                                            width=950, height=500, clabel='PAVD',
+                                                            xlabel='Distance Along Transect (m)',
+                                                            ylabel='Elevation (m)',
+                                                            fontsize={'title': 16, 'xlabel': 16, 'ylabel': 16,
+                                                                      'xticks': 12, 'yticks': 12,
+                                                                      'clabel': 12, 'cticks': 10})
 
-        path2 = hv.Curve((distance, transectDF['Elevation (m)']), label='Ground Elevation').options(color='black',
-                                                                                                    line_width=2)
-        path3 = hv.Curve((distance, canopyElevation), label='Canopy Top Elevation').options(color='grey',
-                                                                                            line_width=1.5)
+        path2 = hv.Curve((distance, transect_df['Elevation (m)']), label='Ground Elevation').options(color='black',
+                                                                                                     line_width=2)
+        path3 = hv.Curve((distance, canopy_elevation), label='Canopy Top Elevation').options(color='grey',
+                                                                                             line_width=1.5)
 
         # Plot all three together
         path = path1 * path2 * path3
-        path.opts(height=500, width=980, ylim=(min(transectDF['Elevation (m)']) - 5, max(canopyElevation) + 5),
+        path.opts(height=500, width=980, ylim=(min(transect_df['Elevation (m)']) - 5, max(canopy_elevation) + 5),
                   xlabel='Distance Along Transect (m)', ylabel='Elevation (m)', legend_position='bottom_right',
                   fontsize={'title': 15, 'xlabel': 15, 'ylabel': 15, 'xticks': 14, 'yticks': 14, 'legend': 14},
                   title=f'GEDI L2B {beam_id}')
@@ -314,7 +430,7 @@ class L2B:
         if not beam_id:
             beam_id = 'BEAM0000'
 
-        latslons = gedi_orbit(self.data, beam_id)
+        latslons = gedi_orbit(self.data, self._h5_paths, beam_id)
 
         # Take the lat/lon dataframe and convert each lat/lon to a shapely point
         latslons['geometry'] = gpd.points_from_xy(latslons['Longitude'], latslons['Latitude'], crs='EPSG:4326')
@@ -339,7 +455,8 @@ class L2B:
         else:
             save_as_html(point_visual(latslons, vdims), out_html_path)
 
-    def _save_image(self, allDF, allDF_col, out_fig_path, fig_title=None, aoiDF=None, target_epsg_code=3857):
+    @staticmethod
+    def _save_image(allDF, allDF_col, out_fig_path, fig_title=None, aoiDF=None, target_epsg_code=3857):
         if aoiDF is not None:
             crs_aoi = aoiDF.crs.srs
         crs_all = allDF.crs.srs
@@ -373,9 +490,9 @@ class L2B:
         return lst
 
 
-class L4A:
+class L4AMulti:
 
-    def __init__(self, h5_file, verbose=True):
+    def __init__(self, h5_dir, verbose=True):
         """
         Class for handling GEDI L4A data.
         Code from: https://github.com/ornldaac/gedi_tutorials/blob/main/2_gedi_l4a_subsets.ipynb
@@ -384,57 +501,71 @@ class L4A:
         :param verbose: Show log statements
         """
         self._verbose = verbose
-        self._h5_file = h5_file
-        self.data = h5py.File(h5_file, 'r')
+        self._h5_dir = h5_dir
 
-    def subset(self, aoi, output_file, overwrite=False):
-
+    def subset(self, aoi, out_dir, overwrite_existing=True):
+        h5_in = glob(os.path.join(self._h5_dir, '*.h5'))
         aoi = gpd.GeoDataFrame.from_file(aoi)
+        for item in h5_in:
+            outfile = os.path.join(out_dir, os.path.basename(item))
+            if (os.path.exists(outfile) and overwrite_existing) or (not os.path.exists(outfile)):
+                if self._verbose:
+                    print('Generating subset for:', item)
+                subset(item, aoi, outfile, 'L4')
 
-        # Create a subset if it doesn't exist or overwrite is True
-        if (os.path.exists(output_file) and overwrite is True) or \
-                os.path.exists(output_file) is False:
-            subset(self.data, aoi, output_file)
-        return output_file
-
-    @classmethod
-    def extract_agbd_multipass(cls, h5_dir, aoi, output_dir):
+    @staticmethod
+    def run_analysis(aoi, input_dir, output_dir):
         """
         Class method for extracting AGBD.
 
-        :param h5_dir: Path containing all h5 data to use for AGBD analysis
         :param aoi: AOI used to clip data
+        :param input_dir: Path containing all h5 data to use for AGBD analysis
         :param output_dir: Directory to save output figures and GIS data
         :return:
         """
 
+        # Load sample data to get path structure
+        sds = SdsDatasets(glob(os.path.join(input_dir, '*.h5'))[0])
+        df_data = {
+            'AGBD': sds.search_path('agbd')[0][8:],
+            'AGBD_SE': sds.search_path('agbd_se')[0][8:],
+            'Quality Flag': sds.search_path('l4_quality_flag')[0][8:],
+            'Latitude': sds.search_path('lat_lowestmode')[0][8:],
+            'Longitude': sds.search_path('lon_lowestmode')[0][8:]
+        }
+
         # Create GDF from all available h5 data
-        gdf = agbd_gdf_from_multi_h5(h5_dir)
+        gdf = gdf_from_multi_h5(input_dir, df_data)
 
+        # Add AOI to GDF
         aoi = gpd.GeoDataFrame.from_file(aoi)
+        # Copy original DF column but add -9999 to indicate invalid data
+        df_aoi_data = {k: -9999 for (k, v) in df_data.items()}
+        df_aoi_data['Quality Flag'] = 0
+        df_aoi_data['geometry'] = aoi.geometry.item()
+        grsm_df = gpd.GeoDataFrame([df_aoi_data])
 
-        grsm_df = gpd.GeoDataFrame([[-9999, -9999, 0, -9999, -9999, aoi.geometry.item()]],
-                               columns=["agbd", "agbd_se", "l4_quality_flag", "lat_lowestmode", "lon_lowestmode",
-                                        "geometry"])
         gdf = pd.concat([gdf, grsm_df])
         gdf.crs = "EPSG:4326"
         gdf_out = gdf.to_crs(epsg=3857)  # 3857 (Web Mercator) for map figure
         ax4 = gdf_out[-1:].plot(color='white', edgecolor='red', alpha=0.3, linewidth=5, figsize=(22, 7))
-        gdf_out[gdf_out['agbd'] != -9999][:-1].plot(ax=ax4, column='agbd', alpha=0.1, linewidth=0,
+        gdf_out[gdf_out['AGBD'] != -9999][:-1].plot(ax=ax4, column='AGBD', alpha=0.1, linewidth=0,
                                                               legend=True)
         ctx.add_basemap(ax4)
         output_fig = os.path.join(output_dir, 'agbd.png')
+        plt.title('Above Ground Biomass Density')
         plt.savefig(output_fig)
 
         # AGBD Standard Error of Prediction
         ax4 = gdf_out[-1:].plot(color='white', edgecolor='red', alpha=0.3, linewidth=5, figsize=(22, 7))
-        gdf_out[gdf_out['agbd_se'] != -9999][:-1].plot(ax=ax4, column='agbd_se', alpha=0.1, linewidth=0,
+        gdf_out[gdf_out['AGBD_SE'] != -9999][:-1].plot(ax=ax4, column='AGBD_SE', alpha=0.1, linewidth=0,
                                                                  legend=True)
         ctx.add_basemap(ax4)
         output_fig = os.path.join(output_dir, 'agbd_se.png')
+        plt.title('Above Ground Biomass Density Standard Error')
         plt.savefig(output_fig)
 
         geojson_path = os.path.join(output_dir, 'agbd.geojson')
-        gdf_out = gdf_out[gdf_out['agbd'] != -9999][:-1]
+        gdf_out = gdf_out[gdf_out['AGBD'] != -9999][:-1]
         gdf_out = gdf_out.to_crs(epsg=4326)  # Switch back to 4326 for shapefiles
-        gdf_out.drop(['l4_quality_flag'], axis=1).to_file(geojson_path, driver="GeoJSON")
+        gdf_out.drop(['Quality Flag'], axis=1).to_file(geojson_path, driver="GeoJSON")

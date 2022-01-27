@@ -87,6 +87,14 @@ class SdsDatasets:
         """Get sensitivity array"""
         return self._h5[[g for g in self._beam_sds(beam) if g.endswith(f'/sensitivity')][0]][()]
 
+    def agbd(self, beam):
+        """Get above ground biomass density array"""
+        return self._h5[[g for g in self._beam_sds(beam) if g.endswith(f'/agbd')][0]][()]
+
+    def agbd_se(self, beam):
+        """Get above ground biomass density array"""
+        return self._h5[[g for g in self._beam_sds(beam) if g.endswith(f'/agbd_se')][0]][()]
+
     def load_dataset(self, target_sds, beam=None):
         """
         Load a dataset in the H5 file
