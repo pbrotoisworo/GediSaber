@@ -143,14 +143,15 @@ class GediFinder:
         else:
             granules = self.search(product, date_range)
 
-        confirm = input('Proceed with download? [Y/n]')
         if auto_confirm is False:
+            confirm = input('Proceed with download? [Y/n]:').rstrip().lstrip()
             if confirm == 'Y':
                 pass
             elif confirm == 'n':
                 return
             else:
-                print('Unknown input', f"{confirm}")
+                print('Unknown input:', f"{confirm}")
+                print('Exiting.')
                 return
 
         for i, item in enumerate(granules, start=1):
