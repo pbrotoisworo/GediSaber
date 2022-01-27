@@ -1,5 +1,4 @@
 # Common GEDI level 2 methods
-import geopandas as gpd
 import geoviews as gv
 
 
@@ -67,49 +66,6 @@ def create_gv_points(point_type, allDF, vdims, title):
         raise ValueError(f'Unknown point_type argument: "{point_type}"')
 
     return points
-
-
-def gedi_orbit(h5_obj, beam_id):
-    """
-    Load a representative GEDI orbit (every 100th shot) and store the orbit data in a GeoDataFrame for easy
-    visualization.
-
-    :param h5_obj: h5 file loaded using h5py package
-    :param beam_id: Name of beam
-    :return:
-    """
-
-    lon_sample = []
-    lat_sample = []
-    shot_sample = []
-    quality_sample = []
-    beam_sample = []
-
-    # Open the SDS
-    lats = h5_obj[f'{beam_id}/geolocation/lat_lowestmode'][()]
-    lons = h5_obj[f'{beam_id}/geolocation/lon_lowestmode'][()]
-    shots = h5_obj[f'{beam_id}/geolocation/shot_number'][()]
-    quality = h5_obj[f'{beam_id}/l2b_quality_flag'][()]
-
-    # Take every 100th shot and append to list
-    for i in range(len(shots)):
-        if i % 100 == 0:
-            shot_sample.append(str(shots[i]))
-            lon_sample.append(lons[i])
-            lat_sample.append(lats[i])
-            quality_sample.append(quality[i])
-            beam_sample.append(beam_id)
-
-    # Write all of the sample shots to a dataframe
-    latslons = gpd.GeoDataFrame(
-        {'Beam': beam_sample,
-         'Shot Number': shot_sample,
-         'Longitude': lon_sample,
-         'Latitude': lat_sample,
-         'Quality Flag': quality_sample
-         })
-
-    return latslons
 
 
 if __name__ == '__main__':

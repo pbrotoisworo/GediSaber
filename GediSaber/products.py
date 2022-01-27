@@ -79,9 +79,6 @@ class L2BMulti:
         df_aoi_data['Quality Flag'] = 0
         df_aoi_data['geometry'] = aoi.geometry.item()
         grsm_df = gpd.GeoDataFrame([df_aoi_data])
-        # grsm_df = gpd.GeoDataFrame(
-        #     [[-9999, -9999, -9999, -9999, 0, -9999, -9999, aoi.geometry.item()]],
-        #     columns=list(df_data.keys()) + ['geometry'])
 
         gdf = pd.concat([gdf, grsm_df])
         gdf.crs = "EPSG:4326"
@@ -497,7 +494,7 @@ class L4AMulti:
         Class for handling GEDI L4A data.
         Code from: https://github.com/ornldaac/gedi_tutorials/blob/main/2_gedi_l4a_subsets.ipynb
 
-        :param h5_file: Path of H5 file
+        :param h5_dir: Path of H5 file
         :param verbose: Show log statements
         """
         self._verbose = verbose
